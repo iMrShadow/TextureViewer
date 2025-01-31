@@ -18,9 +18,9 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "eframe template",
+        "Texture Viewer",
         native_options,
-        Box::new(|cc| Ok(Box::new(TextureViewer::TemplateApp::new(cc)))),
+        Box::new(|cc| Ok(Box::new(TextureViewer::TextureViewerApp::new(cc)))),
     )
 }
 
@@ -50,7 +50,7 @@ fn main() {
             .start(
                 canvas,
                 web_options,
-                Box::new(|cc| Ok(Box::new(TextureViewer::TemplateApp::new(cc)))),
+                Box::new(|cc| Ok(Box::new(TextureViewer::TextureViewerApp::new(cc)))),
             )
             .await;
 
