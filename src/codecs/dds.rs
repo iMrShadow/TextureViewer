@@ -1,41 +1,81 @@
-use std::{fs, path::PathBuf};
-
-use directxtex::ScratchImage;
-use image::{load_from_memory, ImageReader};
+use std::{error::Error, fs, path::PathBuf};
 
 use super::ImageCodec;
 use crate::graphics::{
-    crate_directxtex_utility::get_pixel_format_info_from_image,
-    crate_directxtex_utility::get_texture_dimension,
-    pixel_format::{get_row_pitch, get_slice_pitch},
+    crate_directxtex_utility::DirectXTexUtility,
     texture::{Image, TexMetadata, Texture},
 };
+use directxtex::{ScratchImage, CP_FLAGS_NONE, DDS_FLAGS_NONE, DXGI_FORMAT};
 
 pub struct DDSCodec;
 
 impl ImageCodec for DDSCodec {
-    fn save_to_memory(&self, texture: &Texture) -> Result<Vec<u8>, String> {
-        // Implement PNG encoding logic here
-        Ok(vec![]) // Placeholder
+    fn save_to_memory(&self, texture: &Texture) -> Result<Vec<u8>, Box<dyn Error>> {
+        let new_tex_metadata = directxtex::TexMetadata {
+            width: texture.metadata.width as usize,
+            height: texture.metadata.height as usize,
+            depth: texture.metadata.depth as usize,
+            array_size: texture.metadata.array_size as usize,
+            mip_levels: texture.metadata.mip_levels as usize,
+            misc_flags: 0,
+            misc_flags2: 0,
+            format: DirectXTexUtility::get_dxgi_format_from_pixel_format(
+                texture.metadata.pixel_format_info.pixel_format,
+            ),
+            dimension: DirectXTexUtility::get_texture_dimension(texture.metadata.dimensions),
+        };
+
+        let mut new_images = Vec::new();
+
+        for img in &texture.images {
+            let pitch = new_tex_metadata.format.compute_pitch(
+                img.width as usize,
+                img.height as usize,
+                CP_FLAGS_NONE,
+            )?;
+
+            let new_image = directxtex::Image {
+                width: img.width as usize,
+                height: img.height as usize,
+                row_pitch: pitch.row,
+                slice_pitch: pitch.slice,
+                pixels: img.pixels.as_ptr() as *mut u8,
+                format: new_tex_metadata.format,
+            };
+
+            new_images.push(new_image);
+        }
+
+        let blob = directxtex::save_dds(&new_images, &new_tex_metadata, DDS_FLAGS_NONE)?;
+        let buffer = blob.buffer();
+
+        Ok(buffer.to_vec())
     }
 
-    fn save_to_file(&self, filepath: PathBuf, texture: &Texture) -> Result<Vec<u8>, String> {
-        // Implement PNG encoding logic here
-        Ok(vec![]) // Placeholder
+    fn save_to_file(&self, filepath: PathBuf, texture: &Texture) -> Result<(), Box<dyn Error>> {
+        let bytes = self.save_to_memory(texture)?;
+
+        Ok(fs::write(filepath, bytes)?)
     }
 
-    fn load_from_memory(&self, source: &[u8]) -> Result<Texture, String> {
-        let (scratch, meta, dds) = {
+    fn load_from_memory(&self, source: &[u8]) -> Result<Texture, Box<dyn Error>> {
+        let (scratch, meta) = {
             let mut meta = Default::default();
-            let mut dds = Default::default();
-            let scratch = ScratchImage::load_dds(
+
+            let mut scratch = ScratchImage::load_dds(
                 &source,
-                Default::default(),
+                DDS_FLAGS_NONE,
                 Some(&mut meta),
-                Some(&mut dds),
-            )
-            .unwrap();
-            (scratch, meta, dds)
+                Default::default(),
+            )?;
+
+            if scratch.metadata().format.is_planar() {
+                scratch = scratch.decompress(DXGI_FORMAT::DXGI_FORMAT_R8G8B8A8_UNORM)?;
+            }
+
+            let meta = meta;
+
+            (scratch, meta)
         };
 
         let images = scratch.images();
@@ -44,7 +84,8 @@ impl ImageCodec for DDSCodec {
 
         let mut new_images = Vec::with_capacity(images.len());
 
-        let pixel_format_info = get_pixel_format_info_from_image(&meta);
+        let pixel_format_info =
+            DirectXTexUtility::get_pixel_format_info_from_image(&scratch.metadata());
 
         for img in images {
             let width = img.width as u32;
@@ -57,7 +98,7 @@ impl ImageCodec for DDSCodec {
             let new_image = Image {
                 width,
                 height,
-                format: pixel_format_info,
+                pixel_format_info,
                 row_pitch,
                 slice_pitch,
                 pixels,
@@ -68,30 +109,27 @@ impl ImageCodec for DDSCodec {
             index += slice_pitch as usize;
         }
 
-        let new_metadata = TexMetadata {
+        let new_tex_metadata = TexMetadata {
             width: meta.width as u32,
             height: meta.height as u32,
             depth: meta.depth as u32,
             array_size: meta.array_size as u32,
             mip_levels: meta.mip_levels as u32,
-            format: pixel_format_info,
+            pixel_format_info,
             alpha_mode: 0,
-            dimensions: get_texture_dimension(meta.dimension),
+            dimensions: DirectXTexUtility::get_texture_dimension_from_directxtex(meta.dimension),
             is_cubemap: meta.is_cubemap(),
             is_volumemap: meta.is_volumemap(),
         };
 
         Ok(Texture {
-            metadata: new_metadata,
+            metadata: new_tex_metadata,
             images: new_images,
         })
     }
 
-    fn load_from_file(&self, filepath: PathBuf) -> Result<Texture, String> {
-        match fs::read(&filepath) {
-            Ok(data) => self.load_from_memory(&data),
-            Err(e) => Err(format!("Failed to read file {}: {}", filepath.display(), e)),
-        }
+    fn load_from_file(&self, filepath: PathBuf) -> Result<Texture, Box<dyn Error>> {
+        self.load_from_memory(&fs::read(&filepath)?)
     }
 
     fn supported_extensions(&self) -> Vec<&'static str> {

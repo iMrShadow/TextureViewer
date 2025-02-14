@@ -1,8 +1,8 @@
 #![warn(clippy::all, rust_2018_idioms)]
 
 mod app;
-pub use app::TextureViewerApp;
+pub use app::TextureViewer;
 
-pub mod io;
 pub mod codecs;
 pub mod graphics;
+pub mod io;

@@ -1,97 +1,85 @@
+use std::time::Duration;
+
 use crate::{
-    codecs::codec_manager::CodecManager, graphics::texture::Texture, io::file_manager::FileManager,
+    codecs::codec_manager::CodecManager,
+    graphics::{
+        pixel_format::PixelFormat, swizzling::Platform, texture::Texture,
+        texture_utility::TextureEffects,
+    },
+    io::file_manager::FileManager,
 };
-use egui::{Image, Modifiers, Rect, Scene, TextureHandle, Vec2};
+use egui::{Button, OpenUrl, Rect, Scene, TextureHandle, Vec2};
+use egui_notify::Toasts;
 
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)] // if we add new fields, give them default values when deserializing old state
-pub struct TextureViewerApp {
-    // Example stuff:
-    label: String,
-
-    #[serde(skip)] // This how you opt-out of serialization of a field
-    value: f32,
-
+pub struct TextureViewer {
     #[serde(skip)]
     file_manager: FileManager,
-
+    #[serde(skip)]
     request_texture_source_update: bool,
+    #[serde(skip)]
     request_texture_update: bool,
-
     #[serde(skip)]
     display_texture: Option<TextureHandle>,
-
-    #[serde(skip)]
-    image: Option<Image<'static>>,
-
-    #[serde(skip)]
-    enable_red_channel: bool,
-    #[serde(skip)]
-    enable_green_channel: bool,
-    #[serde(skip)]
-    enable_blue_channel: bool,
-    #[serde(skip)]
-    enable_alpha_channel: bool,
-
     #[serde(skip)]
     current_mip: u32,
     #[serde(skip)]
-    current_slice: u32,
+    current_item: u32,
     #[serde(skip)]
     max_mip: u32,
     #[serde(skip)]
-    max_slice: u32,
-
-    #[serde(skip)]
-    gamma: f32,
-    #[serde(skip)]
-    drag_value: f32,
+    max_item: u32,
     #[serde(skip)]
     scene_rect: Rect,
     #[serde(skip)]
     texture_source: Option<Texture>,
-
     #[serde(skip)]
     codec_manager: CodecManager,
+    #[serde(skip)]
+    texture_effects: TextureEffects,
+    #[serde(skip)]
+    reset_view: bool,
+    #[serde(skip)]
+    display_compressed: bool,
+    #[serde(skip)]
+    toasts: Toasts,
 }
 
-impl Default for TextureViewerApp {
+impl Default for TextureViewer {
     fn default() -> Self {
         Self {
-            // Example stuff:
-            label: "Hello World!".to_owned(),
-            value: 2.7,
             file_manager: {
                 let mut file_manager = FileManager::new().unwrap();
-                file_manager.set_filter_extensions(
-                    CodecManager::new_codec_manager().get_registered_extensions(),
-                );
+                file_manager
+                    .set_filter_extensions(CodecManager::default().get_registered_extensions());
 
                 file_manager
             },
             request_texture_update: false,
             request_texture_source_update: false,
             display_texture: None,
-            image: None,
-            enable_red_channel: true,
-            enable_green_channel: true,
-            enable_blue_channel: true,
-            enable_alpha_channel: true,
             current_mip: 0,
-            current_slice: 0,
+            current_item: 0,
             max_mip: 0,
-            max_slice: 0,
-            gamma: 0.0,
-            drag_value: 0.0,
+            max_item: 0,
             scene_rect: Rect::ZERO,
-            codec_manager: CodecManager::new_codec_manager(),
+            codec_manager: CodecManager::default(),
             texture_source: None,
+            texture_effects: TextureEffects::default(),
+            reset_view: false,
+            display_compressed: false,
+            toasts: {
+                let mut toasts = Toasts::default();
+                toasts = toasts.with_anchor(egui_notify::Anchor::BottomRight);
+                toasts
+            },
         }
     }
 }
 
-impl TextureViewerApp {
+impl TextureViewer {
     /// Called once before the first frame.
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // This is also where you can customize the look and feel of egui using
@@ -107,7 +95,7 @@ impl TextureViewerApp {
     }
 }
 
-impl eframe::App for TextureViewerApp {
+impl eframe::App for TextureViewer {
     /// Called by the frame work to save state before shutdown.
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, eframe::APP_KEY, self);
@@ -115,354 +103,526 @@ impl eframe::App for TextureViewerApp {
 
     /// Called each time the UI needs repainting, which may be many times per second.
     fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
-        // Put your widgets into a `SidePanel`, `TopBottomPanel`, `CentralPanel`, `Window` or `Area`.
-        // For inspiration and more examples, go to https://emilk.github.io/egui
+        if ctx.input(|input| {
+            input.key_pressed(egui::Key::ArrowLeft) || input.key_pressed(egui::Key::A)
+        }) {
+            self.select_previous_file();
+        }
+
+        if ctx.input(|input| {
+            input.key_pressed(egui::Key::ArrowRight) || input.key_pressed(egui::Key::D)
+        }) {
+            self.select_next_file();
+        }
 
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
-            // The top panel is often a good place for a menu bar:
-
-            egui::menu::bar(ui, |ui| {
-                ui.menu_button("File", |ui| {
-                    let reset_shortcut = egui::KeyboardShortcut::new(
-                        Modifiers::CTRL | Modifiers::SHIFT,
-                        egui::Key::R,
-                    );
-
-                    let next_image_shortcut =
-                        egui::KeyboardShortcut::new(Modifiers::NONE, egui::Key::ArrowRight);
-                    let previous_image_shortcut =
-                        egui::KeyboardShortcut::new(Modifiers::NONE, egui::Key::ArrowLeft);
-
-                    if ui
-                        .add(
-                            egui::Button::new("Open")
-                                .shortcut_text(ui.ctx().format_shortcut(&reset_shortcut)),
-                        )
-                        .clicked()
-                    {
-                        if let Some(path) = rfd::FileDialog::new().pick_file() {
-                            self.request_texture_update = true;
-
-                            match self
-                                .file_manager
-                                .from_folder(path.parent().unwrap().to_path_buf())
-                            {
-                                Ok(filemanager) => {
-                                    self.request_texture_source_update = true;
-                                    self.request_texture_update = true;
-                                    filemanager
-                                }
-                                Err(e) => {
-                                    eprintln!("Error: {}", e);
-                                }
-                            };
-
-                            self.file_manager.set_selected_file(path.to_path_buf());
-                        }
-                    }
-
-                    if ui
-                        .add(
-                            egui::Button::new("Open Directory")
-                                .shortcut_text(ui.ctx().format_shortcut(&reset_shortcut)),
-                        )
-                        .clicked()
-                    {
-                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                            match self.file_manager.from_folder(path.to_path_buf()) {
-                                Ok(filemanager) => {
-                                    self.request_texture_source_update = true;
-                                    self.request_texture_update = true;
-                                    filemanager
-                                }
-                                Err(e) => {
-                                    eprintln!("Error: {}", e);
-                                }
-                            };
-                        }
-                    }
-
-                    ui.separator();
-
-                    if ui
-                        .add(
-                            egui::Button::new("Previous")
-                                .shortcut_text(ui.ctx().format_shortcut(&next_image_shortcut)),
-                        )
-                        .clicked()
-                    {
-                        self.file_manager.previous_file();
-                        self.request_texture_update = true;
-                        self.request_texture_source_update = true;
-                    }
-
-                    if ui
-                        .add(
-                            egui::Button::new("Next")
-                                .shortcut_text(ui.ctx().format_shortcut(&previous_image_shortcut)),
-                        )
-                        .clicked()
-                    {
-                        self.file_manager.previous_file();
-                        self.request_texture_update = true;
-                        self.request_texture_source_update = true;
-                    }
-
-                    ui.separator();
-                    if ui.button("Quit").clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                });
-
-                ui.menu_button("Edit", |ui| {});
-
-                ui.menu_button("Help", |ui| {});
-
-                ui.add_space(16.0);
-
-                egui::widgets::global_theme_preference_buttons(ui);
-            });
+            self.display_menu(ui, ctx);
         });
 
         egui::TopBottomPanel::top("tools_panel").show(ctx, |ui| {
             // The top panel is often a good place for a menu bar:
             ui.horizontal(|ui| {
-                if ui
-                    .toggle_value(&mut self.enable_red_channel, "red")
-                    .changed()
-                {
-                    self.request_texture_update = true;
-                };
-
-                if ui
-                    .toggle_value(&mut self.enable_green_channel, "green")
-                    .changed()
-                {
-                    self.request_texture_update = true;
-                };
-
-                if ui
-                    .toggle_value(&mut self.enable_blue_channel, "blue")
-                    .changed()
-                {
-                    self.request_texture_update = true;
-                };
-
-                if ui
-                    .toggle_value(&mut self.enable_alpha_channel, "alpha")
-                    .changed()
-                {
-                    self.request_texture_update = true;
-                };
-
-                let left_arrow_icon = egui::include_image!("../assets/left-arrow.png");
-                let right_arrow_icon = egui::include_image!("../assets/right-arrow.png");
-
-                if ui
-                    .add(egui::ImageButton::new(left_arrow_icon))
-                    .clicked()
-                {
-                    self.file_manager.previous_file();
-                    if self.file_manager.get_selected_file().is_some() {
-                        self.request_texture_update = true;
-                        self.request_texture_source_update = true;
-                    }
-                }
-
-                if ui
-                .add(egui::ImageButton::new(right_arrow_icon))
-                    .clicked()
-                {
-                    self.file_manager.next_file();
-                    if self.file_manager.get_selected_file().is_some() {
-                        self.request_texture_update = true;
-                        self.request_texture_source_update = true;
-                    }
-                }
-
-                // let _ = ui.button("rotate 90 left");
-                // let _ = ui.button("rotate 90 right");
-                // let _ = ui.button("flip up/down");
-                // let _ = ui.button("flip left/right");
-                if ui
-                    .add(egui::Slider::new(&mut self.current_mip, 0..=self.max_mip).text("Mip"))
-                    .changed()
-                {
-                    self.request_texture_update = true;
-                }
-
-                if ui
-                    .add(
-                        egui::Slider::new(&mut self.current_slice, 0..=self.max_slice)
-                            .text("Slice"),
-                    )
-                    .changed()
-                {
-                    self.request_texture_update = true;
-                }
-
-                // egui::ComboBox::from_label("Pixel Format")
-                //     .selected_text(format!("{:?}", &mut self.pixel_format))
-                //     .show_ui(ui, |ui| {
-                //         let _ = ui.button("WTF");
-                //         ui.selectable_value(
-                //             &mut self.pixel_format,
-                //             PixelFormat::R8Unorm,
-                //             "R8Unorm",
-                //         );
-                //         ui.selectable_value(
-                //             &mut self.pixel_format,
-                //             PixelFormat::LA8Unorm,
-                //             "LA8Unorm",
-                //         );
-                //         ui.selectable_value(
-                //             &mut self.pixel_format,
-                //             PixelFormat::RG8Unorm,
-                //             "RG8Unorm",
-                //         );
-                //     });
-                // egui::ComboBox::from_label("Gamma")
-                //     .selected_text(format!("{:?}", &mut self.gamma))
-                //     .show_ui(ui, |ui| {
-                //         ui.add(egui::Slider::new(&mut self.gamma, 0.0..=10.0));
-                //         ui.selectable_value(&mut self.gamma, 1.0, "1.0");
-                //         ui.selectable_value(&mut self.gamma, 1.2, "1.2");
-                //         ui.selectable_value(&mut self.gamma, 1.4, "1.4");
-                //     });
+                self.display_tool_bar(ui);
             });
         });
 
         egui::TopBottomPanel::bottom("bottom_panel").show(ctx, |ui| {
             ui.vertical_centered(|ui| {
-                let current_path = match self.file_manager.get_selected_file() {
-                    Some(path) => path.display().to_string(),
-                    None => "No Selected File".to_owned(),
-                };
-
-                ui.heading(current_path);
+                self.display_image_information(ui);
             });
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            let mut reset_view = false;
-
-            if self.request_texture_update {
-                if self.request_texture_source_update {
-                    let path = self.file_manager.get_selected_file().unwrap();
-
-                    self.texture_source =
-                        match CodecManager::load_from_file(&self.codec_manager, &path) {
-                            Ok(texture) => Some(texture),
-                            Err(e) => {
-                                eprintln!("Error: {}", e);
-                                Some(Texture::new())
-                            }
-                        };
-
-                    self.current_mip = 0;
-                    self.current_slice = 0;
-                    self.max_mip = self
-                        .texture_source
-                        .as_ref()
-                        .unwrap_or(&Texture::new())
-                        .metadata
-                        .mip_levels
-                        - 1;
-                    self.max_slice = self
-                        .texture_source
-                        .as_ref()
-                        .unwrap_or(&Texture::new())
-                        .metadata
-                        .array_size
-                        - 1;
-                    self.request_texture_source_update = false;
-                    reset_view = true;
-                }
-
-                if let Some(texture_source) = &self.texture_source {
-                    let (width, height, mut pixels) =
-                        texture_source.get_rgba8_data(self.current_mip, self.current_slice, 0);
-
-                    for pixel in pixels.chunks_exact_mut(4) {
-                        pixel[0] = pixel[0] * (self.enable_red_channel as u8);
-                        pixel[1] = pixel[1] * (self.enable_green_channel as u8);
-                        pixel[2] = pixel[2] * (self.enable_blue_channel as u8);
-                        pixel[3] = if self.enable_alpha_channel {
-                            pixel[3]
-                        } else {
-                            255
-                        };
-                    }
-
-                    let image = egui::ColorImage::from_rgba_unmultiplied(
-                        [width as usize, height as usize],
-                        &pixels,
-                    );
-
-                    let texture_options = egui::TextureOptions {
-                        magnification: egui::TextureFilter::Linear,
-                        minification: egui::TextureFilter::Linear,
-                        wrap_mode: egui::TextureWrapMode::ClampToEdge,
-                        mipmap_mode: None,
-                    };
-
-                    let texture = ctx.load_texture("example_texture", image, texture_options);
-                    self.display_texture = Some(texture);
-
-                    self.request_texture_update = false;
-                }
-            }
-
-            // Could be useful for mip and slice selection
-            //     egui::Area::new(egui::Id::new("my_area"))
-            //    // .anchor(egui::Align2::LEFT_TOP, [0.0, 0.0]).order(egui::Order::Foreground)
-            //     .show(ctx, |ui| {
-            //         ui.label("Floating text!");
-            //     });
-
-            let scene = Scene::new()
-                .max_inner_size([350.0, 1000.0])
-                .zoom_range(0.1..=20.0);
-
-            let mut inner_rect = Rect::NAN;
-
-            let response = scene
-                .show(ui, &mut self.scene_rect, |ui| {
-                    if let Some(texture) = &self.display_texture {
-                        let size = texture.size_vec2();
-
-                        if let Some(texture_source) = &self.texture_source {
-                            let size = Vec2::new(
-                                texture_source.metadata.width as f32,
-                                texture_source.metadata.height as f32,
-                            );
-
-                            let sized_texture = egui::load::SizedTexture::new(texture, size);
-                            ui.add(egui::Image::new(sized_texture).fit_to_exact_size(size));
-                        }
-                    }
-
-                    inner_rect = ui.min_rect();
-                })
-                .response;
-
-            if reset_view || response.double_clicked() {
-                self.scene_rect = inner_rect;
-            }
+            self.display_scene(ui, ctx);
         });
     }
 }
 
-fn powered_by_egui_and_eframe(ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        ui.label("Powered by ");
-        ui.hyperlink_to("egui", "https://github.com/emilk/egui");
-        ui.label(" and ");
-        ui.hyperlink_to(
-            "eframe",
-            "https://github.com/emilk/egui/tree/master/crates/eframe",
-        );
-        ui.label(".");
-    });
+impl TextureViewer {
+    fn select_previous_file(&mut self) {
+        self.file_manager.previous_file();
+        if self.file_manager.get_selected_file().is_some() {
+            self.request_texture_update = true;
+            self.request_texture_source_update = true;
+        }
+    }
+
+    fn select_next_file(&mut self) {
+        self.file_manager.next_file();
+        if self.file_manager.get_selected_file().is_some() {
+            self.request_texture_update = true;
+            self.request_texture_source_update = true;
+        }
+    }
+
+    /// Display the toolbar at the top of the window.
+    fn display_tool_bar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if ui
+                .button("◀")
+                .on_hover_text("Go to previous file")
+                .clicked()
+            {
+                self.select_previous_file();
+            }
+
+            if ui.button("▶").on_hover_text("Go to next file").clicked() {
+                self.select_next_file();
+            }
+
+            if ui
+                .toggle_value(&mut self.texture_effects.channel_filter.0, "R")
+                .on_hover_text("Toggle red channel")
+                .changed()
+            {
+                self.request_texture_update = true;
+            };
+
+            if ui
+                .toggle_value(&mut self.texture_effects.channel_filter.1, "G")
+                .on_hover_text("Toggle green channel")
+                .changed()
+            {
+                self.request_texture_update = true;
+            };
+
+            if ui
+                .toggle_value(&mut self.texture_effects.channel_filter.2, "B")
+                .on_hover_text("Toggle blue channel")
+                .changed()
+            {
+                self.request_texture_update = true;
+            };
+
+            if ui
+                .toggle_value(&mut self.texture_effects.channel_filter.3, "A")
+                .on_hover_text("Toggle alpha channel")
+                .changed()
+            {
+                self.request_texture_update = true;
+            };
+
+            if ui
+                .button("⟲")
+                .on_hover_text("Rotate 90 degrees left")
+                .clicked()
+            {
+                self.texture_effects.rotate_90_left_count += 1;
+                self.request_texture_update = true;
+                self.reset_view = true;
+            }
+            if ui
+                .button("⟳")
+                .on_hover_text("Rotate 90 degrees right")
+                .clicked()
+            {
+                self.texture_effects.rotate_90_right_count += 1;
+                self.request_texture_update = true;
+                self.reset_view = true;
+            }
+            if ui.button("↕").on_hover_text("Flip vertical").clicked() {
+                self.texture_effects.flip_vertical_count += 1;
+                self.request_texture_update = true;
+                self.reset_view = true;
+            }
+            if ui.button("↔").on_hover_text("Flip horizontal").clicked() {
+                self.texture_effects.flip_horizontal_count += 1;
+                self.request_texture_update = true;
+                self.reset_view = true;
+            }
+
+            if self.max_item > 0 {
+                if ui
+                    .add(egui::Slider::new(&mut self.current_item, 0..=self.max_item).text("Item"))
+                    .on_hover_text("Current array element being displayed")
+                    .changed()
+                {
+                    self.request_texture_update = true;
+                }
+            }
+
+            if self.max_mip > 0 {
+                if ui
+                    .add(egui::Slider::new(&mut self.current_mip, 0..=self.max_mip).text("Mip"))
+                    .on_hover_text("Current mip being displayed")
+                    .changed()
+                {
+                    self.request_texture_update = true;
+                }
+            }
+
+            if ui
+                .checkbox(&mut self.display_compressed, "Display Compressed")
+                .changed()
+            {
+                self.request_texture_update = true;
+            }
+        });
+    }
+
+    /// Display the menu bar at the top of the window.
+    fn display_menu(&mut self, ui: &mut egui::Ui, ctx: &eframe::egui::Context) {
+        egui::menu::bar(ui, |ui| {
+            ui.menu_button("File", |ui| {
+                if ui.button("Open").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter(
+                            "Supported Images",
+                            &self.codec_manager.get_registered_extensions(),
+                        )
+                        .pick_file()
+                    {
+                        match self
+                            .file_manager
+                            .from_folder(path.parent().unwrap().to_path_buf())
+                        {
+                            Ok(file_manager) => {
+                                self.request_texture_source_update = true;
+                                self.request_texture_update = true;
+                                file_manager
+                            }
+                            Err(e) => {
+                                self.show_error(&e.to_string());
+                                self.log_error(&e.to_string());
+                            }
+                        };
+
+                        self.file_manager.set_selected_file(path.to_path_buf());
+                    }
+
+                    ui.close_menu();
+                }
+
+                if ui.button("Open Directory").clicked() {
+                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                        match self.file_manager.from_folder(path.to_path_buf()) {
+                            Ok(file_manager) => {
+                                self.request_texture_source_update = true;
+                                self.request_texture_update = true;
+                                file_manager
+                            }
+                            Err(e) => {
+                                self.show_error(&e.to_string());
+                                self.log_error(&e.to_string());
+                            }
+                        };
+                    }
+
+                    ui.close_menu();
+                }
+
+                if ui
+                    .add_enabled(self.texture_source.is_some(), Button::new("Save As"))
+                    .clicked()
+                {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("PNG", &["png"])
+                        .add_filter("JPEG", &["jpg", "jpeg"])
+                        .add_filter("BMP", &["bmp"])
+                        .add_filter("TGA", &["tga"])
+                        .add_filter("DDS", &["dds"])
+                        .save_file()
+                    {
+                        match self.codec_manager.save_to_file(
+                            &path.to_path_buf(),
+                            &self.texture_source.as_ref().unwrap(),
+                            &self.texture_effects,
+                        ) {
+                            Ok(_) => {}
+                            Err(e) => {
+                                self.show_error(&e.to_string());
+                                self.log_error(&e.to_string());
+                            }
+                        };
+                    }
+
+                    match self.file_manager.refresh() {
+                        Ok(file_manager) => file_manager,
+                        Err(e) => {
+                            self.show_error(&e.to_string());
+                            self.log_error(&e.to_string());
+                        }
+                    };
+
+                    ui.close_menu();
+                }
+
+                ui.separator();
+
+                if ui.button("Previous File").clicked() {
+                    self.select_previous_file();
+                    ui.close_menu();
+                }
+
+                if ui.button("Next File").clicked() {
+                    self.select_next_file();
+                    ui.close_menu();
+                }
+
+                ui.separator();
+                if ui.button("Quit").clicked() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            });
+
+            ui.menu_button("Edit", |ui| {
+                ui.menu_button("Pixel Format", |ui| {
+                    let mut selected_pixel_format = self.texture_effects.pixel_format;
+
+                    let vec_pixel_format = vec![
+                        PixelFormat::B5G6R5,
+                        PixelFormat::B5G5R5A1,
+                        PixelFormat::R8G8B8,
+                        PixelFormat::B8G8R8,
+                        PixelFormat::R8G8B8A8,
+                        PixelFormat::B8G8R8A8,
+                        PixelFormat::R16G16B16A16,
+                        PixelFormat::R32G32B32A32,
+                        PixelFormat::BC1,
+                        PixelFormat::BC2,
+                        PixelFormat::BC3,
+                        PixelFormat::BC4,
+                        PixelFormat::BC5,
+                        PixelFormat::BC6H,
+                        // PixelFormat::BC7, currently BC7 takes too long to compress
+                    ];
+
+                    for format in vec_pixel_format {
+                        if ui
+                            .selectable_value(
+                                &mut selected_pixel_format,
+                                format,
+                                format.to_string(),
+                            )
+                            .clicked()
+                        {
+                            self.texture_effects.pixel_format = selected_pixel_format;
+                            self.request_texture_update = true;
+                            ui.close_menu();
+                        }
+                    }
+                });
+
+                ui.separator();
+                let platforms = vec![
+                    None,
+                    Some(Platform::PS4),
+                    Some(Platform::Xbox360),
+                    Some(Platform::PSVita),
+                ];
+
+                ui.menu_button("Swizzle", |ui| {
+                    let mut selected_platform = self.texture_effects.swizzle;
+
+                    for platform in &platforms {
+                        if ui
+                            .selectable_value(
+                                &mut selected_platform,
+                                *platform,
+                                match platform {
+                                    Some(p) => p.to_string(),
+                                    None => "None".to_string(),
+                                },
+                            )
+                            .clicked()
+                        {
+                            self.texture_effects.swizzle = *platform;
+                            self.request_texture_update = true;
+                            ui.close_menu();
+                        }
+                    }
+                });
+
+                ui.menu_button("Deswizzle", |ui| {
+                    let mut selected_platform = self.texture_effects.deswizzle;
+
+                    for platform in &platforms {
+                        if ui
+                            .selectable_value(
+                                &mut selected_platform,
+                                *platform,
+                                match platform {
+                                    Some(p) => p.to_string(),
+                                    None => "None".to_string(),
+                                },
+                            )
+                            .clicked()
+                        {
+                            self.texture_effects.deswizzle = *platform;
+                            self.request_texture_update = true;
+                            ui.close_menu();
+                        }
+                    }
+                });
+            });
+
+            if ui.button("About").clicked() {
+                ctx.open_url(OpenUrl::new_tab(
+                    "https://github.com/iMrShadow/TextureViewer",
+                ));
+                ui.close_menu();
+            }
+        });
+
+        self.toasts.show(ctx);
+    }
+
+    /// Update the display texture.
+    fn update_display_texture(&mut self, ctx: &eframe::egui::Context) {
+        if self.request_texture_source_update {
+            let path = self.file_manager.get_selected_file().unwrap();
+
+            self.texture_source = match CodecManager::load_from_file(&self.codec_manager, &path) {
+                Ok(texture) => Some(texture),
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    Some(Texture::new())
+                }
+            };
+
+            // Reset all texture settings
+            self.current_mip = 0;
+            self.current_item = 0;
+            self.max_mip = self
+                .texture_source
+                .as_ref()
+                .unwrap_or(&Texture::new())
+                .metadata
+                .mip_levels
+                - 1;
+            self.max_item = self
+                .texture_source
+                .as_ref()
+                .unwrap_or(&Texture::new())
+                .metadata
+                .array_size
+                - 1;
+            self.request_texture_source_update = false;
+            self.reset_view = true;
+            self.texture_effects = TextureEffects::default();
+        }
+
+        if let Some(texture_source) = &self.texture_source {
+            let image = match texture_source.get_image(self.current_mip, self.current_item, 0) {
+                Ok(image) => image,
+                Err(e) => {
+                    self.show_error(&e.to_string());
+                    self.log_error(&e.to_string());
+                    self.request_texture_update = false;
+                    return;
+                }
+            };
+
+            // Get the RGBA8 pixels
+            let rgba8_image = match self
+                .texture_effects
+                .get_transformed_rgba8_pixels(&image, self.display_compressed)
+            {
+                Ok(rgba8_image) => rgba8_image,
+                Err(e) => {
+                    self.show_error(&e.to_string());
+                    self.log_error(&e.to_string());
+                    self.request_texture_update = false;
+                    return;
+                }
+            };
+
+            // Construct the color image
+            let image = egui::ColorImage::from_rgba_unmultiplied(
+                [rgba8_image.0 as usize, rgba8_image.1 as usize],
+                &rgba8_image.2,
+            );
+
+            let texture_options = egui::TextureOptions {
+                magnification: egui::TextureFilter::Linear,
+                minification: egui::TextureFilter::Linear,
+                wrap_mode: egui::TextureWrapMode::ClampToEdge,
+                mipmap_mode: None,
+            };
+
+            // Load the texture
+            self.display_texture =
+                Some(ctx.load_texture("display_texture", image, texture_options));
+
+            self.request_texture_update = false;
+        }
+    }
+
+    /// Display the texture in the scene.
+    fn display_scene(&mut self, ui: &mut egui::Ui, ctx: &eframe::egui::Context) {
+        if self.request_texture_update {
+            self.update_display_texture(ctx);
+        }
+
+        let scene = Scene::new()
+            .max_inner_size([350.0, 1000.0])
+            .zoom_range(0.1..=20.0);
+
+        let mut inner_rect = Rect::NAN;
+
+        let response = scene
+            .show(ui, &mut self.scene_rect, |ui| {
+                if let Some(texture) = &self.display_texture {
+                    if let Some(texture_source) = &self.texture_source {
+                        let dimensions = Vec2::new(
+                            texture_source.metadata.width as f32,
+                            texture_source.metadata.height as f32,
+                        );
+                        let dimensions = match (self.texture_effects.rotate_90_left_count as i32
+                            % 2)
+                            - (self.texture_effects.rotate_90_right_count as i32 % 2)
+                        {
+                            0 => dimensions,
+                            _ => Vec2::new(dimensions.y, dimensions.x),
+                        };
+
+                        let sized_texture = egui::load::SizedTexture::new(texture, dimensions);
+
+                        ui.add(egui::Image::new(sized_texture).fit_to_exact_size(dimensions));
+                    }
+                }
+
+                inner_rect = ui.min_rect();
+            })
+            .response;
+
+        if self.reset_view || response.double_clicked() {
+            self.scene_rect = inner_rect;
+            self.reset_view = false;
+        }
+    }
+
+    /// Display the image information at the bottom of the window.
+    fn display_image_information(&mut self, ui: &mut egui::Ui) {
+        let current_path = match self.file_manager.get_selected_file() {
+            Some(path) => path.display().to_string(),
+            None => "No Selected File".to_owned(),
+        };
+
+        if let Some(texture_source) = &self.texture_source {
+            ui.label(format!(
+                "{} | Size: {} x {} x {} px | Format: {} | Array Elements: {} | Mips: {}",
+                current_path,
+                texture_source.metadata.width,
+                texture_source.metadata.height,
+                texture_source.metadata.depth,
+                texture_source.metadata.pixel_format_info.pixel_format,
+                texture_source.metadata.array_size,
+                texture_source.metadata.mip_levels
+            ));
+        } else {
+            ui.label(current_path);
+        }
+    }
+
+    /// Display an error message as a notification.
+    fn show_error(&mut self, message: &str) {
+        self.toasts
+            .error(message)
+            .duration(Some(Duration::from_secs(5)));
+    }
+
+    fn log_error(&mut self, message: &str) {
+        eprintln!("Error: {}", message);
+    }
 }

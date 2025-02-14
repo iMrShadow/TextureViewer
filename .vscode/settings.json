@@ -1,10 +1,33 @@
 {
     "cSpell.words": [
+        "accesskit",
+        "anstyle",
+        "atspi",
         "bgra",
+        "BGRX",
+        "bytemuck",
+        "Clippy",
         "cubemap",
+        "deswizzle",
+        "deswizzling",
         "directxtex",
         "dxgi",
+        "eframe",
         "egui",
-        "volumemap"
+        "libxcb",
+        "Luma",
+        "psvita",
+        "rgbx",
+        "SHAREDEXP",
+        "SNORM",
+        "SRGB",
+        "Swizzable",
+        "Swizzlable",
+        "texel",
+        "unmultiplied",
+        "UNORM",
+        "unswizzle",
+        "volumemap",
+        "zbus"
     ]
 }

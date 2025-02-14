@@ -23,9 +23,9 @@ mod tests {
         let file_path = dir.path().join("test.txt");
         File::create(&file_path)?;
 
-        let mut file_manager = FileManager::new();
+        let mut file_manager = FileManager::new().unwrap();
+        file_manager.from_folder(dir.path().to_path_buf())?;
 
-        file_manager = file_manager.from_folder(dir.path().to_path_buf())?;
         assert_eq!(file_manager.selected_folder_path, dir.path());
         assert_eq!(file_manager.files.len(), 1);
         assert_eq!(file_manager.files[0], file_path);
@@ -36,62 +36,64 @@ mod tests {
     #[test]
     fn test_set_filter_extensions() -> Result<(), io::Error> {
         let dir = tempdir()?;
-        // File::create(dir.path().join("image1.jpg"))?;
-        // File::create(dir.path().join("image2.png"))?;
-        // File::create(dir.path().join("document.txt"))?;
+        File::create(dir.path().join("image1.jpg"))?;
+        File::create(dir.path().join("image2.png"))?;
+        File::create(dir.path().join("test.txt"))?;
 
-        // let mut file_manager = FileManager::new()from_folder(dir.path().to_path_buf())?;
-        // file_manager.set_filter_extensions(vec!["jpg".to_string(), "png".to_string()]);
+        let mut file_manager = FileManager::new()?;
+        file_manager.from_folder(dir.path().to_path_buf())?;
+        file_manager.set_filter_extensions(vec!["jpg".to_string(), "png".to_string()]);
 
-        // assert_eq!(file_manager.files.len(), 2);
-        // assert!(file_manager.files.iter().all(|file| {
-        //     let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
-        //     ext == "jpg" || ext == "png"
-        // }));
+        assert_eq!(file_manager.files.len(), 2);
+        assert!(file_manager.files.iter().all(|file| {
+            let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+            ext == "jpg" || ext == "png"
+        }));
         Ok(())
     }
 
     #[test]
     fn test_navigation() -> Result<(), io::Error> {
         let dir = tempdir()?;
-        File::create(dir.path().join("file1.txt"))?;
-        File::create(dir.path().join("file2.txt"))?;
-        File::create(dir.path().join("file3.txt"))?;
+        File::create(dir.path().join("test1.txt"))?;
+        File::create(dir.path().join("test2.txt"))?;
+        File::create(dir.path().join("test3.txt"))?;
 
-        let mut file_manager = FileManager::from_folder(dir.path().to_path_buf())?;
+        let mut file_manager = FileManager::new().unwrap();
 
+        file_manager.from_folder(dir.path().to_path_buf())?;
         // Initial selection
         assert_eq!(
             file_manager.get_selected_file(),
-            Some(&dir.path().join("file1.txt"))
+            Some(&dir.path().join("test1.txt"))
         );
 
-        // Navigate to next file
+        // Next
         file_manager.next_file();
         assert_eq!(
             file_manager.get_selected_file(),
-            Some(&dir.path().join("file2.txt"))
+            Some(&dir.path().join("test2.txt"))
         );
 
-        // Navigate to next file
+        // Next
         file_manager.next_file();
         assert_eq!(
             file_manager.get_selected_file(),
-            Some(&dir.path().join("file3.txt"))
+            Some(&dir.path().join("test3.txt"))
         );
 
-        // Wrap around to the first file
+        // Clamp to first file
         file_manager.next_file();
         assert_eq!(
             file_manager.get_selected_file(),
-            Some(&dir.path().join("file1.txt"))
+            Some(&dir.path().join("test1.txt"))
         );
 
-        // Navigate to previous file (wrap around to the last file)
+        // Clamp to last file
         file_manager.previous_file();
         assert_eq!(
             file_manager.get_selected_file(),
-            Some(&dir.path().join("file3.txt"))
+            Some(&dir.path().join("test3.txt"))
         );
 
         Ok(())

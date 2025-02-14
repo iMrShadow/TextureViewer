@@ -1,10 +1,8 @@
-use std::fs;
-use std::io::{self, Read};
-use std::path::Path;
+use std::error::Error;
 
 use crate::graphics::pixel_format::PixelFormatInfo;
 
-use super::pixel_format_decoder::PixelDecoder;
+use super::texture_utility::TextureEffects;
 
 #[derive(Default)]
 pub struct Texture {
@@ -12,30 +10,31 @@ pub struct Texture {
     pub images: Vec<Image>,
 }
 
+#[derive(Default, Clone)]
 pub struct Image {
     pub width: u32,
     pub height: u32,
-    pub format: PixelFormatInfo,
+    pub pixel_format_info: PixelFormatInfo,
     pub row_pitch: u32,
     pub slice_pitch: u32,
     pub pixels: Vec<u8>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 pub struct TexMetadata {
     pub width: u32,
     pub height: u32,
     pub depth: u32,
     pub array_size: u32,
     pub mip_levels: u32,
-    pub format: PixelFormatInfo,
+    pub pixel_format_info: PixelFormatInfo,
     pub alpha_mode: u32,
     pub dimensions: TexDimension,
     pub is_cubemap: bool,
     pub is_volumemap: bool,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 pub enum TexDimension {
     Tex1D,
     #[default]
@@ -53,7 +52,7 @@ impl Texture {
                 depth: 0,
                 array_size: 0,
                 mip_levels: 0,
-                format: PixelFormatInfo::default(),
+                pixel_format_info: PixelFormatInfo::default(),
                 alpha_mode: 0,
                 dimensions: TexDimension::Tex2D,
                 is_cubemap: false,
@@ -64,48 +63,80 @@ impl Texture {
     }
 
     // Level (mip index), layer (array index), slice (z index)
-    pub fn get_image(&self, level: u32, layer: u32, slice: u32) -> Result<&Image, String> {
-        if level >= self.metadata.mip_levels || layer >= self.metadata.array_size {
+    // DirectXTex - GetImage
+    pub fn get_image(&self, mip: u32, item: u32, slice: u32) -> Result<&Image, Box<dyn Error>> {
+        if mip >= self.metadata.mip_levels {
             return Err(format!(
-                "Image index out of bounds: {} >= {}",
-                level, self.metadata.mip_levels
-            ));
+                "Mip index out of bounds: {} >= {}",
+                mip, self.metadata.mip_levels
+            )
+            .into());
         }
 
-        let max_slices = (1.max(self.metadata.depth >> level)).max(1); // Ensure at least 1G
+        match self.metadata.dimensions {
+            TexDimension::Tex1D | TexDimension::Tex2D => {
+                if slice > 0 {
+                    return Err(format!("Slice index out of bounds: {} >= 0", slice).into());
+                }
 
-        if self.metadata.is_cubemap {
-            if layer >= self.metadata.array_size {
-                return Err(format!("Image index out of bounds: {} >= 6", layer));
+                if item >= self.metadata.array_size {
+                    return Err(format!(
+                        "Item index out of bounds: {} >= {}",
+                        item, self.metadata.array_size
+                    )
+                    .into());
+                }
+
+                self.images
+                    .get((item * self.metadata.mip_levels + mip) as usize)
+                    .ok_or_else(|| {
+                        format!(
+                            "Image not found for mip: {}, item: {}, slice: {}",
+                            mip, item, slice
+                        )
+                        .into()
+                    })
             }
-        } else {
-            if layer >= max_slices {
-                return Err(format!(
-                    "Image index out of bounds: {} >= {}",
-                    layer, max_slices
-                ));
+
+            TexDimension::Tex3D => {
+                if item > 0 {
+                    return Err(format!("Item index out of bounds: {} >= 0", item).into());
+                }
+
+                let mut index = 0;
+                let mut depth = self.metadata.depth;
+
+                for _ in 0..mip {
+                    index += depth;
+                    if depth > 1 {
+                        depth >>= 1;
+                    }
+                }
+
+                if slice >= depth {
+                    return Err(format!("Slice index out of bounds: {} >= {}", slice, depth).into());
+                }
+
+                index += depth;
+
+                self.images.get((index) as usize).ok_or_else(|| {
+                    format!(
+                        "Image not found for mip: {}, item: {}, slice: {}",
+                        mip, item, slice
+                    )
+                    .into()
+                })
             }
         }
-
-        let mut index = 0;
-        for mip in 0..level {
-            // Calculate the total number of images in previous mip levels
-            let depth = 1.max(self.metadata.depth >> mip);
-            index += (depth * self.metadata.array_size) as usize;
-        }
-
-        // Add the offset for the current layer and slice
-        index += (layer * max_slices + slice) as usize;
-
-        // Return the requested image
-        self.images
-            .get(index)
-            .ok_or_else(|| format!("Invalid image index: {}", index))
     }
 
     pub fn get_rgba8_data(&self, level: u32, layer: u32, slice: u32) -> (u32, u32, Vec<u8>) {
         match self.get_image(level, layer, slice) {
-            Ok(image_data) => self.get_rgba8_data_from_image(image_data),
+            Ok(image_data) => (
+                image_data.width,
+                image_data.height,
+                image_data.pixels.clone(),
+            ),
             Err(e) => {
                 eprintln!("Error getting image data: {}", e);
                 (0, 0, Vec::new())
@@ -113,126 +144,41 @@ impl Texture {
         }
     }
 
-    pub fn get_rgba8_data_from_image(&self, image: &Image) -> (u32, u32, Vec<u8>) {
-        match PixelDecoder::decode(
-            &image.pixels,
-            image.format.pixel_format,
-            image.format.pixel_data_type,
-            image.format.color_space,
-            image.width,
-            image.height,
-        ) {
-            Ok(decoded_data) => (image.width, image.height, decoded_data),
-            Err(e) => {
-                eprintln!("Error decoding image data: {}", e);
-                (0, 0, Vec::new())
-            }
-        }
+    pub fn is_compressed(&self) -> bool {
+        self.metadata.pixel_format_info.pixel_format.is_compressed()
     }
 
-    pub fn rotate(&mut self, degrees: u32) {
-        for image in self.images.iter_mut() {
-            let (width, height) = (image.width, image.height);
-            let mut rotated_data = vec![0; (width * height * 4) as usize];
+    /// Apply effects for saving the texture
+    /// Pipeline: Deswizzle -> Decompress -> Decode -> Process -> Compress -> Swizzle
+    pub fn new_transformed_texture(
+        &self,
+        effects: &TextureEffects,
+    ) -> Result<Texture, Box<dyn Error>> {
+        let mut metadata = self.metadata.clone();
 
-            for y in 0..height {
-                for x in 0..width {
-                    let src_index = (y * width + x) as usize * 4;
-                    let dest_index = ((width - x - 1) * height + y) as usize * 4;
+        metadata.pixel_format_info = PixelFormatInfo {
+            pixel_format: effects.pixel_format,
+            pixel_data_type: super::pixel_format::PixelDataType::UNorm,
+            color_space: super::pixel_format::ColorSpace::Linear,
+            is_premultiplied: false,
+        };
 
-                    rotated_data[dest_index] = image.pixels[src_index];
-                    rotated_data[dest_index + 1] = image.pixels[src_index + 1];
-                    rotated_data[dest_index + 2] = image.pixels[src_index + 2];
-                    rotated_data[dest_index + 3] = image.pixels[src_index + 3];
-                }
-            }
+        let total_rotation =
+            (effects.rotate_90_left_count as i32 % 4) - (effects.rotate_90_right_count as i32 % 4);
 
-            image.pixels = rotated_data;
-            std::mem::swap(&mut image.width, &mut image.height);
+        if total_rotation != 0 {
+            std::mem::swap(&mut metadata.width, &mut metadata.height);
         }
-    }
 
-    pub fn flip_left(&mut self) {
-        for image in self.images.iter_mut() {
-            let (width, height) = (image.width, image.height);
-            let mut flipped_data = vec![0; (width * height * 4) as usize];
+        let mut new_images = Vec::new();
 
-            for y in 0..height {
-                for x in 0..width {
-                    let src_index = (y * width + x) as usize * 4;
-                    let dest_index = (y * width + (width - x - 1)) as usize * 4;
-
-                    flipped_data[dest_index] = image.pixels[src_index];
-                    flipped_data[dest_index + 1] = image.pixels[src_index + 1];
-                    flipped_data[dest_index + 2] = image.pixels[src_index + 2];
-                    flipped_data[dest_index + 3] = image.pixels[src_index + 3];
-                }
-            }
-
-            image.pixels = flipped_data;
+        for image in &self.images {
+            new_images.push(effects.get_transformed_pixels(image)?);
         }
-    }
 
-    pub fn flip_up(&mut self) {
-        for image in self.images.iter_mut() {
-            let (width, height) = (image.width, image.height);
-            let mut flipped_data = vec![0; (width * height * 4) as usize];
-
-            for y in 0..height {
-                for x in 0..width {
-                    let src_index = (y * width + x) as usize * 4;
-                    let dest_index = ((height - y - 1) * width + x) as usize * 4;
-
-                    flipped_data[dest_index] = image.pixels[src_index];
-                    flipped_data[dest_index + 1] = image.pixels[src_index + 1];
-                    flipped_data[dest_index + 2] = image.pixels[src_index + 2];
-                    flipped_data[dest_index + 3] = image.pixels[src_index + 3];
-                }
-            }
-
-            image.pixels = flipped_data;
-        }
-    }
-
-    pub fn flip_down(&mut self) {
-        for image in self.images.iter_mut() {
-            let (width, height) = (image.width, image.height);
-            let mut flipped_data = vec![0; (width * height * 4) as usize];
-
-            for y in 0..height {
-                for x in 0..width {
-                    let src_index = (y * width + x) as usize * 4;
-                    let dest_index = (y * width + (height - x - 1)) as usize * 4;
-
-                    flipped_data[dest_index] = image.pixels[src_index];
-                    flipped_data[dest_index + 1] = image.pixels[src_index + 1];
-                    flipped_data[dest_index + 2] = image.pixels[src_index + 2];
-                    flipped_data[dest_index + 3] = image.pixels[src_index + 3];
-                }
-            }
-
-            image.pixels = flipped_data;
-        }
-    }
-
-    pub fn flip_right(&mut self) {
-        for image in self.images.iter_mut() {
-            let (width, height) = (image.width, image.height);
-            let mut flipped_data = vec![0; (width * height * 4) as usize];
-
-            for y in 0..height {
-                for x in 0..width {
-                    let src_index = (y * width + x) as usize * 4;
-                    let dest_index = (y * width + (width - x - 1)) as usize * 4;
-
-                    flipped_data[dest_index] = image.pixels[src_index];
-                    flipped_data[dest_index + 1] = image.pixels[src_index + 1];
-                    flipped_data[dest_index + 2] = image.pixels[src_index + 2];
-                    flipped_data[dest_index + 3] = image.pixels[src_index + 3];
-                }
-            }
-
-            image.pixels = flipped_data;
-        }
+        Ok(Texture {
+            metadata,
+            images: new_images,
+        })
     }
 }
