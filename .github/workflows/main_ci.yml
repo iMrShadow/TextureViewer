@@ -1,0 +1,38 @@
+name: Rust CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  build-and-test:
+    name: Build & Test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        build-type: [debug, release]
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Install Rust
+      uses: rust-lang/setup-rust@v1
+      with:
+        rust-version: stable
+
+    - name: Cache dependencies
+      uses: Swatinem/rust-cache@v2
+
+    - name: Build (Debug)
+      run: cargo build --verbose
+      if: matrix.build-type == 'debug'
+
+    - name: Build (Release)
+      run: cargo build --release --verbose
+      if: matrix.build-type == 'release'
+
+    - name: Run tests
+      run: cargo test --verbose
